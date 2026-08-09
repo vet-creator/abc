@@ -1,0 +1,12 @@
+build/
+out/
+cmake-build-*/
+.vs/
+.vscode/
+*.user
+*.obj
+*.o
+*.exe
+*.pdb
+*.ilk
+*.zip

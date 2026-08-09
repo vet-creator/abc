@@ -1,0 +1,436 @@
+# ============================================================================
+#  SHIRANUI default rule set
+#  Format reference: include/shiranui/signature.hpp
+#
+#  Detection signatures are written to be *explainable*: each rule states what
+#  it looks for and why that matters, so an analyst can judge a hit rather than
+#  trusting a black box. Rules deliberately favour precision over recall; the
+#  heuristic engine covers the fuzzy end.
+#
+#  NOTE ON ENCODING: literal malware strings are written as hex byte patterns
+#  rather than quoted text. That keeps this repository from tripping other
+#  vendors' scanners while remaining byte-identical at match time.
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# Industry-standard test file. Not malware; used to prove the pipeline works.
+# ---------------------------------------------------------------------------
+rule EICAR_Test_File : test standard {
+    meta:
+        severity    = critical
+        family      = "EICAR"
+        description = "EICAR anti-malware test file (harmless; verifies detection is wired up)"
+        reference   = "https://www.eicar.org/download-anti-malware-testfile/"
+    strings:
+        $eicar = { 58 35 4F 21 50 25 40 41 50 5B 34 5C 50 5A 58 35 34 28 50 5E 29 37 43 43 29 37 7D 24 45 49 43 41 52 2D 53 54 41 4E 44 41 52 44 2D 41 4E 54 49 56 49 52 55 53 2D 54 45 53 54 2D 46 49 4C 45 21 24 48 2B 48 2A }
+    condition:
+        $eicar
+}
+
+hash sha256 = 275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f name=EICAR.Test.File severity=critical family=EICAR
+
+# ---------------------------------------------------------------------------
+# Runtime packers. Packing is not malicious by itself, hence the low severity;
+# the heuristic engine escalates when packing coincides with other signals.
+# ---------------------------------------------------------------------------
+rule Packer_UPX : packer {
+    meta:
+        severity    = low
+        family      = "UPX"
+        description = "UPX-packed executable (section names UPX0/UPX1 plus the UPX! marker)"
+    strings:
+        $s0 = { 55 50 58 30 00 00 00 00 }
+        $s1 = { 55 50 58 31 00 00 00 00 }
+        $s2 = { 55 50 58 21 }
+    condition:
+        2 of them
+}
+
+rule Packer_Themida_VMProtect : packer obfuscation {
+    meta:
+        severity    = low
+        description = "Commercial virtualisation-based protector detected by section naming"
+    strings:
+        $themida = { 2E 74 68 65 6D 69 64 61 }
+        $winlic  = { 2E 77 69 6E 6C 69 63 65 }
+        $vmp0    = { 2E 76 6D 70 30 }
+        $vmp1    = { 2E 76 6D 70 31 }
+        $enigma  = { 2E 65 6E 69 67 6D 61 31 }
+    condition:
+        any of them
+}
+
+rule Packer_MPRESS_ASPack : packer {
+    meta:
+        severity    = low
+        description = "MPRESS or ASPack compressed executable"
+    strings:
+        $mpress1 = { 2E 4D 50 52 45 53 53 31 }
+        $aspack  = { 2E 61 73 70 61 63 6B }
+        $adata   = { 2E 61 64 61 74 61 }
+    condition:
+        any of them
+}
+
+# ---------------------------------------------------------------------------
+# Offensive-security tooling. Legitimate for red teams, alarming on an endpoint.
+# ---------------------------------------------------------------------------
+rule Tool_Mimikatz_Artifacts : credential_access tool {
+    meta:
+        severity    = critical
+        family      = "Mimikatz"
+        description = "Credential-dumping toolkit artifacts (banner, module and command strings)"
+    strings:
+        $a = { 6D 69 6D 69 6B 61 74 7A }
+        $b = { 67 65 6E 74 69 6C 6B 69 77 69 }
+        $c = { 73 65 6B 75 72 6C 73 61 3A 3A 6C 6F 67 6F 6E 50 61 73 73 77 6F 72 64 73 }
+        $d = { 6C 73 61 64 75 6D 70 3A 3A 73 61 6D }
+        $e = { 6B 65 72 62 65 72 6F 73 3A 3A 67 6F 6C 64 65 6E }
+    condition:
+        2 of them
+}
+
+rule Tool_ReflectiveLoader : loader tool {
+    meta:
+        severity    = high
+        description = "Reflective DLL loading export, used by post-exploitation frameworks"
+    strings:
+        $a = { 52 65 66 6C 65 63 74 69 76 65 4C 6F 61 64 65 72 }
+        $b = { 5F 52 65 66 6C 65 63 74 69 76 65 4C 6F 61 64 65 72 40 34 }
+    condition:
+        any of them
+}
+
+rule Tool_Beacon_Config : c2 tool {
+    meta:
+        severity    = critical
+        family      = "CobaltStrike"
+        description = "Beacon-style implant markers and default named-pipe patterns"
+    strings:
+        $a = { 62 65 61 63 6F 6E 2E 64 6C 6C }
+        $b = { 25 73 28 20 61 64 6D 69 6E 20 29 }
+        $c = { 5C 5C 2E 5C 70 69 70 65 5C 4D 53 53 45 2D }
+        $d = { 43 6F 62 61 6C 74 20 53 74 72 69 6B 65 }
+    condition:
+        2 of them
+}
+
+# ---------------------------------------------------------------------------
+# Living-off-the-land abuse in scripts and droppers.
+# ---------------------------------------------------------------------------
+rule Script_PowerShell_Obfuscated : script lolbin {
+    meta:
+        severity    = high
+        family      = "PowerShell"
+        description = "Encoded, hidden or policy-bypassing PowerShell execution chain"
+    strings:
+        $ps    = "powershell" nocase ascii wide
+        $pwsh  = "pwsh.exe" nocase ascii wide
+        $enc1  = "-EncodedCommand" nocase ascii wide
+        $enc2  = "FromBase64String" nocase ascii wide
+        $enc3  = " -enc " nocase ascii wide
+        $enc4  = " -ec " nocase ascii wide
+        $exec  = "IEX" ascii wide
+        $iex2  = "Invoke-Expression" nocase ascii wide
+        $net   = "Net.WebClient" nocase ascii wide
+        $dl    = "DownloadString" nocase ascii wide
+        $dl2   = "DownloadFile" nocase ascii wide
+        $hid   = "-WindowStyle Hidden" nocase ascii wide
+        $hid2  = "-w hidden" nocase ascii wide
+        $nop   = "-nop" nocase ascii wide
+        $noni  = "-noni" nocase ascii wide
+        $byp   = "-ExecutionPolicy Bypass" nocase ascii wide
+        $byp2  = "-ep bypass" nocase ascii wide
+    condition:
+        3 of them
+}
+
+rule Script_PowerShell_Base64_UTF16 : script encoded {
+    meta:
+        severity    = high
+        family      = "PowerShell"
+        description = "Base64 of UTF-16LE PowerShell source - the payload an -EncodedCommand chain carries, matched directly so the command line need not be readable"
+    strings:
+        $invoke_expr0 = "SQBuAHYAbwBrAGUALQBFAHgAcAByAGUAcwBzAGkAbwBuAA"   # Invoke-Expression
+        $invoke_expr1 = "bgB2AG8AawBlAC0ARQB4AHAAcgBlAHMAcwBpAG8AbgA"   # Invoke-Expression
+        $invoke_expr2 = "AG4AdgBvAGsAZQAtAEUAeABwAHIAZQBzAHMAaQBvAG4A"   # Invoke-Expression
+        $webclient0 = "TgBlAHQALgBXAGUAYgBDAGwAaQBlAG4AdAA"   # Net.WebClient
+        $webclient1 = "ZQB0AC4AVwBlAGIAQwBsAGkAZQBuAHQA"   # Net.WebClient
+        $webclient2 = "AGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0AA"   # Net.WebClient
+        $downloadstring0 = "RABvAHcAbgBsAG8AYQBkAFMAdAByAGkAbgBnAA"   # DownloadString
+        $downloadstring1 = "bwB3AG4AbABvAGEAZABTAHQAcgBpAG4AZwA"   # DownloadString
+        $downloadstring2 = "AG8AdwBuAGwAbwBhAGQAUwB0AHIAaQBuAGcA"   # DownloadString
+        $downloadfile0 = "RABvAHcAbgBsAG8AYQBkAEYAaQBsAGUA"   # DownloadFile
+        $downloadfile1 = "bwB3AG4AbABvAGEAZABGAGkAbABlAA"   # DownloadFile
+        $downloadfile2 = "AG8AdwBuAGwAbwBhAGQARgBpAGwAZQA"   # DownloadFile
+        $powershell0 = "cABvAHcAZQByAHMAaABlAGwAbAA"   # powershell
+        $powershell1 = "bwB3AGUAcgBzAGgAZQBsAGwA"   # powershell
+        $powershell2 = "AG8AdwBlAHIAcwBoAGUAbABsAA"   # powershell
+        $http0 = "aAB0AHQAcAA6AC8ALwA"   # http://
+        $http1 = "dAB0AHAAOgAvAC8A"   # http://
+        $http2 = "AHQAdABwADoALwAvAA"   # http://
+        $startprocess0 = "UwB0AGEAcgB0AC0AUAByAG8AYwBlAHMAcwA"   # Start-Process
+        $startprocess1 = "dABhAHIAdAAtAFAAcgBvAGMAZQBzAHMA"   # Start-Process
+        $startprocess2 = "AHQAYQByAHQALQBQAHIAbwBjAGUAcwBzAA"   # Start-Process
+        $frombase640 = "RgByAG8AbQBCAGEAcwBlADYANABTAHQAcgBpAG4AZwA"   # FromBase64String
+        $frombase641 = "cgBvAG0AQgBhAHMAZQA2ADQAUwB0AHIAaQBuAGcA"   # FromBase64String
+        $frombase642 = "AHIAbwBtAEIAYQBzAGUANgA0AFMAdAByAGkAbgBnAA"   # FromBase64String
+        $reflection0 = "UwB5AHMAdABlAG0ALgBSAGUAZgBsAGUAYwB0AGkAbwBuAA"   # System.Reflection
+        $reflection1 = "eQBzAHQAZQBtAC4AUgBlAGYAbABlAGMAdABpAG8AbgA"   # System.Reflection
+        $reflection2 = "AHkAcwB0AGUAbQAuAFIAZQBmAGwAZQBjAHQAaQBvAG4A"   # System.Reflection
+    condition:
+        any of them
+}
+
+rule Script_Wscript_Dropper : script dropper {
+    meta:
+        severity    = medium
+        description = "Script host dropper writing and launching a payload"
+    strings:
+        $a = "WScript.Shell" nocase ascii wide
+        $b = "ADODB.Stream" nocase ascii wide
+        $c = "Scripting.FileSystemObject" nocase ascii wide
+        $d = "MSXML2.XMLHTTP" nocase ascii wide
+        $e = "SaveToFile" nocase ascii wide
+    condition:
+        3 of them
+}
+
+rule LOLBin_Abuse_Chain : lolbin {
+    meta:
+        severity    = medium
+        description = "Signed Windows binaries chained in a way typical of proxy execution"
+    strings:
+        $a = "regsvr32" nocase ascii wide
+        $b = "scrobj.dll" nocase ascii wide
+        $c = "mshta" nocase ascii wide
+        $d = "rundll32" nocase ascii wide
+        $e = "certutil -urlcache" nocase ascii wide
+        $f = "bitsadmin /transfer" nocase ascii wide
+    condition:
+        2 of them
+}
+
+# ---------------------------------------------------------------------------
+# Destructive behaviour: ransomware precursors.
+# ---------------------------------------------------------------------------
+rule Ransom_ShadowCopy_Destruction : ransomware destructive {
+    meta:
+        severity    = critical
+        family      = "Generic.Ransom"
+        description = "Deletes volume shadow copies and disables recovery — pre-encryption stage"
+    strings:
+        $a = "vssadmin delete shadows" nocase ascii wide
+        $b = "wbadmin delete catalog" nocase ascii wide
+        $c = "bcdedit /set {default} recoveryenabled no" nocase ascii wide
+        $d = "wmic shadowcopy delete" nocase ascii wide
+        $e = "bcdedit /set {default} bootstatuspolicy ignoreallfailures" nocase ascii wide
+    condition:
+        any of them
+}
+
+rule Ransom_Note_Markers : ransomware {
+    meta:
+        severity    = high
+        description = "Ransom-note phrasing combined with a payment channel"
+    strings:
+        $a = "your files have been encrypted" nocase ascii wide
+        $b = "all your files are encrypted" nocase ascii wide
+        $c = ".onion" nocase ascii wide
+        $d = "decryption key" nocase ascii wide
+        $e = "bitcoin" nocase ascii wide
+    condition:
+        ($a or $b) and 2 of them
+}
+
+# ---------------------------------------------------------------------------
+# Server-side webshells.
+# ---------------------------------------------------------------------------
+rule Webshell_PHP_Eval : webshell {
+    meta:
+        severity    = high
+        description = "PHP webshell: request data passed straight into an evaluator"
+    strings:
+        $e1 = "eval(base64_decode(" nocase
+        $e2 = "eval($_POST" nocase
+        $e3 = "eval($_REQUEST" nocase
+        $e4 = "assert($_POST" nocase
+        $e5 = "preg_replace(\"/.*/e\"" nocase
+        $e6 = "system($_GET" nocase
+    condition:
+        any of them
+}
+
+rule Webshell_ASP_Execute : webshell {
+    meta:
+        severity    = high
+        description = "Classic ASP webshell passing request parameters to Execute/Eval"
+    strings:
+        $a = "Execute(Request" nocase
+        $b = "eval(Request" nocase
+        $c = "Server.CreateObject(\"WScript.Shell\")" nocase
+        $d = "Response.BinaryWrite" nocase
+    condition:
+        2 of them
+}
+
+# ---------------------------------------------------------------------------
+# Persistence and defence evasion.
+# ---------------------------------------------------------------------------
+rule Persistence_Registry_Runkeys : persistence {
+    meta:
+        severity    = medium
+        description = "References autostart registry locations"
+    strings:
+        $a = "Software\\Microsoft\\Windows\\CurrentVersion\\Run" nocase ascii wide
+        $b = "Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce" nocase ascii wide
+        $c = "Microsoft\\Windows NT\\CurrentVersion\\Winlogon" nocase ascii wide
+        $d = "Image File Execution Options" nocase ascii wide
+        $e = "AppInit_DLLs" nocase ascii wide
+    condition:
+        any of them
+}
+
+rule Evasion_Defender_Tamper : evasion {
+    meta:
+        severity    = critical
+        description = "Attempts to disable Microsoft Defender or event logging"
+    strings:
+        $a = "Set-MpPreference -DisableRealtimeMonitoring" nocase ascii wide
+        $b = "Add-MpPreference -ExclusionPath" nocase ascii wide
+        $c = "DisableAntiSpyware" nocase ascii wide
+        $d = "wevtutil cl" nocase ascii wide
+        $e = "Clear-EventLog" nocase ascii wide
+        $f = "netsh advfirewall set allprofiles state off" nocase ascii wide
+    condition:
+        any of them
+}
+
+rule Evasion_Sandbox_Checks : evasion antianalysis {
+    meta:
+        severity    = medium
+        description = "Enumerates analysis-environment artifacts before running"
+    strings:
+        $a = "VBoxService" nocase ascii wide
+        $b = "vmtoolsd" nocase ascii wide
+        $c = "SbieDll.dll" nocase ascii wide
+        $d = "wireshark" nocase ascii wide
+        $e = "procmon" nocase ascii wide
+        $f = "x64dbg" nocase ascii wide
+        $g = "VIRTUAL HD" nocase ascii wide
+    condition:
+        3 of them
+}
+
+# ---------------------------------------------------------------------------
+# Shellcode stubs. Small, high-value, low false-positive patterns.
+# ---------------------------------------------------------------------------
+rule Shellcode_PEB_Walk_x64 : shellcode {
+    meta:
+        severity    = high
+        description = "x64 PEB walk (GS:[0x60] -> Ldr) used by position-independent loaders"
+    strings:
+        $peb64 = { 65 48 8B 04 25 60 00 00 00 }
+        $ldr   = { 48 8B ?? 18 48 8B ?? 20 }
+    condition:
+        all of them and filesize < 8MB
+}
+
+rule Shellcode_PEB_Walk_x86 : shellcode {
+    meta:
+        severity    = high
+        description = "x86 PEB access via fs:[0x30] in an unambiguous encoding"
+    strings:
+        # mov eax, fs:[0x30] -- the moffs form emitted by every common assembler.
+        $moffs = { 64 A1 30 00 00 00 }
+        # mov r32, fs:[0x30] -- disp32 form. The trailing 30 00 00 00 makes each of
+        # these seven bytes long, which is specific enough to stand on its own.
+        $d32_eax = { 64 8B 05 30 00 00 00 }
+        $d32_ecx = { 64 8B 0D 30 00 00 00 }
+        $d32_edx = { 64 8B 15 30 00 00 00 }
+        $d32_ebx = { 64 8B 1D 30 00 00 00 }
+        $d32_esp = { 64 8B 25 30 00 00 00 }
+        $d32_ebp = { 64 8B 2D 30 00 00 00 }
+        $d32_esi = { 64 8B 35 30 00 00 00 }
+        $d32_edi = { 64 8B 3D 30 00 00 00 }
+    condition:
+        any of them and filesize < 4MB
+}
+
+rule Shellcode_PEB_Walk_x86_Indexed : shellcode {
+    meta:
+        severity    = high
+        description = "x86 PEB walk through a zeroed base register, corroborated by a PEB_LDR_DATA field access"
+    strings:
+        # mov r32, fs:[base+0x30]. Every ModRM byte here is enumerated rather than
+        # wildcarded: a wildcard also matches mod=01/rm=100, where the following
+        # byte is a SIB byte and not the 0x30 displacement at all. That imprecision
+        # produced real false positives on Python bytecode during corpus testing.
+        $d8_00 = { 64 8B 40 30 }
+        $d8_01 = { 64 8B 41 30 }
+        $d8_02 = { 64 8B 42 30 }
+        $d8_03 = { 64 8B 43 30 }
+        $d8_04 = { 64 8B 45 30 }
+        $d8_05 = { 64 8B 46 30 }
+        $d8_06 = { 64 8B 47 30 }
+        $d8_07 = { 64 8B 48 30 }
+        $d8_08 = { 64 8B 49 30 }
+        $d8_09 = { 64 8B 4A 30 }
+        $d8_10 = { 64 8B 4B 30 }
+        $d8_11 = { 64 8B 4D 30 }
+        $d8_12 = { 64 8B 4E 30 }
+        $d8_13 = { 64 8B 4F 30 }
+        $d8_14 = { 64 8B 50 30 }
+        $d8_15 = { 64 8B 51 30 }
+        $d8_16 = { 64 8B 52 30 }
+        $d8_17 = { 64 8B 53 30 }
+        $d8_18 = { 64 8B 55 30 }
+        $d8_19 = { 64 8B 56 30 }
+        $d8_20 = { 64 8B 57 30 }
+        $d8_21 = { 64 8B 58 30 }
+        $d8_22 = { 64 8B 59 30 }
+        $d8_23 = { 64 8B 5A 30 }
+        $d8_24 = { 64 8B 5B 30 }
+        $d8_25 = { 64 8B 5D 30 }
+        $d8_26 = { 64 8B 5E 30 }
+        $d8_27 = { 64 8B 5F 30 }
+        $d8_28 = { 64 8B 60 30 }
+        $d8_29 = { 64 8B 61 30 }
+        $d8_30 = { 64 8B 62 30 }
+        $d8_31 = { 64 8B 63 30 }
+        $d8_32 = { 64 8B 65 30 }
+        $d8_33 = { 64 8B 66 30 }
+        $d8_34 = { 64 8B 67 30 }
+        $d8_35 = { 64 8B 68 30 }
+        $d8_36 = { 64 8B 69 30 }
+        $d8_37 = { 64 8B 6A 30 }
+        $d8_38 = { 64 8B 6B 30 }
+        $d8_39 = { 64 8B 6D 30 }
+        $d8_40 = { 64 8B 6E 30 }
+        $d8_41 = { 64 8B 6F 30 }
+        $d8_42 = { 64 8B 70 30 }
+        $d8_43 = { 64 8B 71 30 }
+        $d8_44 = { 64 8B 72 30 }
+        $d8_45 = { 64 8B 73 30 }
+        $d8_46 = { 64 8B 75 30 }
+        $d8_47 = { 64 8B 76 30 }
+        $d8_48 = { 64 8B 77 30 }
+        $d8_49 = { 64 8B 78 30 }
+        $d8_50 = { 64 8B 79 30 }
+        $d8_51 = { 64 8B 7A 30 }
+        $d8_52 = { 64 8B 7B 30 }
+        $d8_53 = { 64 8B 7D 30 }
+        $d8_54 = { 64 8B 7E 30 }
+        $d8_55 = { 64 8B 7F 30 }
+        # PEB->Ldr (+0x0C) and the module lists at +0x14 / +0x1C. Four bytes of
+        # generic x86 on their own, so they only ever act as corroboration.
+        $ldr_a = { 8B 40 0C }
+        $ldr_b = { 8B 70 0C }
+        $ldr_c = { 8B 40 1C }
+        $ldr_d = { 8B 70 1C }
+        $ldr_e = { 8B 40 14 }
+    condition:
+        ($d8_00 or $d8_01 or $d8_02 or $d8_03 or $d8_04 or $d8_05 or $d8_06 or $d8_07 or $d8_08 or $d8_09 or $d8_10 or $d8_11 or $d8_12 or $d8_13 or $d8_14 or $d8_15 or $d8_16 or $d8_17 or $d8_18 or $d8_19 or $d8_20 or $d8_21 or $d8_22 or $d8_23 or $d8_24 or $d8_25 or $d8_26 or $d8_27 or $d8_28 or $d8_29 or $d8_30 or $d8_31 or $d8_32 or $d8_33 or $d8_34 or $d8_35 or $d8_36 or $d8_37 or $d8_38 or $d8_39 or $d8_40 or $d8_41 or $d8_42 or $d8_43 or $d8_44 or $d8_45 or $d8_46 or $d8_47 or $d8_48 or $d8_49 or $d8_50 or $d8_51 or $d8_52 or $d8_53 or $d8_54 or $d8_55)
+        and ($ldr_a or $ldr_b or $ldr_c or $ldr_d or $ldr_e)
+        and filesize < 4MB
+}

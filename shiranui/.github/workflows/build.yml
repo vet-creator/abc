@@ -1,0 +1,270 @@
+# SPDX-License-Identifier: MIT
+name: build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Recorded in the binary so a reported detection can always be traced back to
+  # the exact source it came from.
+  SHIRANUI_COMMIT: ${{ github.sha }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # The real deliverable: native Windows binaries.
+  # ---------------------------------------------------------------------------
+  windows:
+    name: windows / msvc / ${{ matrix.arch }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            can_run: true
+          - arch: Win32
+            can_run: true
+          - arch: ARM64
+            can_run: false      # cross-compiled; the runner cannot execute it
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -B build
+          -G "Visual Studio 17 2022"
+          -A ${{ matrix.arch }}
+          -DCMAKE_BUILD_TYPE=Release
+          -DSHIRANUI_WERROR=ON
+          -DSHIRANUI_COMMIT=${{ env.SHIRANUI_COMMIT }}
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        if: matrix.can_run
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Smoke test against EICAR
+        if: matrix.can_run
+        shell: pwsh
+        run: |
+          # Written byte-wise so the literal never sits in the repository, where
+          # it would trip the developer's own antivirus on checkout.
+          $eicar = [char[]](88,53,79,33,80,37,64,65,80,91,52,92,80,90,88,53,52,40,80,94,41,55,67,67,41,55,125,36,69,73,67,65,82,45,83,84,65,78,68,65,82,68,45,65,78,84,73,86,73,82,85,83,45,84,69,83,84,45,70,73,76,69,33,36,72,43,72,42) -join ''
+          New-Item -ItemType Directory -Force -Path smoke | Out-Null
+          [IO.File]::WriteAllText("$PWD/smoke/eicar.com", $eicar)
+
+          & ./build/bin/Release/shiranui.exe scan smoke --rules rules --no-color
+          # Exit code 1 means "malicious found", which is the expected outcome.
+          if ($LASTEXITCODE -ne 1) {
+            Write-Error "expected exit code 1 (malicious found), got $LASTEXITCODE"
+            exit 1
+          }
+          Write-Host "EICAR detected as expected"
+
+      - name: Verify the posture auditor runs
+        if: matrix.can_run
+        shell: pwsh
+        run: |
+          & ./build/bin/Release/shiranui.exe audit --json | Out-Null
+          # audit exits 3 when a check is unhealthy, which is normal on a runner.
+          if ($LASTEXITCODE -notin 0,3) {
+            Write-Error "audit failed with $LASTEXITCODE"
+            exit 1
+          }
+
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          $out = "dist/shiranui-${{ matrix.arch }}"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Copy-Item build/bin/Release/shiranui.exe $out/
+          Copy-Item -Recurse rules $out/rules
+          Copy-Item README.md, LICENSE $out/
+          Copy-Item docs/SECURITY.md $out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shiranui-windows-${{ matrix.arch }}
+          path: dist/shiranui-${{ matrix.arch }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # MinGW: proves the Windows sources are not silently MSVC-only.
+  # ---------------------------------------------------------------------------
+  mingw:
+    name: windows / mingw-w64 (cross)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-mingw-w64-x86-64 cmake ninja-build
+
+      - name: Configure
+        run: |
+          cat > /tmp/mingw.cmake <<'EOF'
+          set(CMAKE_SYSTEM_NAME Windows)
+          set(CMAKE_SYSTEM_PROCESSOR x86_64)
+          set(CMAKE_C_COMPILER   x86_64-w64-mingw32-gcc)
+          set(CMAKE_CXX_COMPILER x86_64-w64-mingw32-g++)
+          set(CMAKE_RC_COMPILER  x86_64-w64-mingw32-windres)
+          set(CMAKE_FIND_ROOT_PATH /usr/x86_64-w64-mingw32)
+          set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+          set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+          set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+          EOF
+          cmake -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=/tmp/mingw.cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSHIRANUI_BUILD_TESTS=OFF \
+            -DSHIRANUI_COMMIT=${{ env.SHIRANUI_COMMIT }}
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shiranui-windows-mingw-x64
+          path: build/bin/shiranui.exe
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # The engine is portable by design, which lets the whole test suite run under
+  # sanitizers on Linux — far better tooling than the Windows runners offer.
+  # ---------------------------------------------------------------------------
+  linux:
+    name: linux / ${{ matrix.cc }} ${{ matrix.label }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cc: g++
+            label: release
+            sanitize: "OFF"
+            build_type: Release
+          - cc: clang++
+            label: release
+            sanitize: "OFF"
+            build_type: Release
+          - cc: clang++
+            label: "asan+ubsan"
+            sanitize: "ON"
+            build_type: Debug
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang
+
+      - name: Configure
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_CXX_COMPILER=${{ matrix.cc }}
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DSHIRANUI_WERROR=ON
+          -DSHIRANUI_SANITIZE=${{ matrix.sanitize }}
+          -DSHIRANUI_COMMIT=${{ env.SHIRANUI_COMMIT }}
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        env:
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          ASAN_OPTIONS: detect_leaks=1
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Detection smoke test
+        run: |
+          mkdir -p smoke
+          python3 - <<'EOF'
+          # Assembled from character codes so the repository never contains the
+          # literal test string.
+          codes = [88,53,79,33,80,37,64,65,80,91,52,92,80,90,88,53,52,40,80,94,41,55,
+                   67,67,41,55,125,36,69,73,67,65,82,45,83,84,65,78,68,65,82,68,45,65,
+                   78,84,73,86,73,82,85,83,45,84,69,83,84,45,70,73,76,69,33,36,72,43,72,42]
+          open('smoke/eicar.com','wb').write(bytes(codes))
+          EOF
+          set +e
+          ./build/bin/shiranui scan smoke --rules rules --no-color
+          status=$?
+          set -e
+          if [ "$status" -ne 1 ]; then
+            echo "expected exit code 1 (malicious found), got $status"
+            exit 1
+          fi
+          echo "EICAR detected as expected"
+
+      - name: False-positive check against system binaries
+        if: matrix.sanitize == 'OFF'
+        run: |
+          # A detection engine that flags /usr/bin is worse than useless. This is
+          # a real corpus of several thousand unrelated executables and scripts.
+          set +e
+          ./build/bin/shiranui scan /usr/bin /usr/lib/x86_64-linux-gnu --rules rules --no-color --threads 2 > fp.log
+          status=$?
+          set -e
+          tail -3 fp.log
+          if [ "$status" -ne 0 ]; then
+            echo "::error::false positives detected on clean system binaries"
+            grep -E '^(MALICIOUS|SUSPICIOUS)' fp.log || true
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Release: only on a version tag, and only if everything above is green.
+  # ---------------------------------------------------------------------------
+  release:
+    name: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, mingw, linux]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Package
+        run: |
+          mkdir -p release
+          cd artifacts
+          for dir in */; do
+            name="${dir%/}"
+            (cd "$name" && zip -r "../../release/${name}-${GITHUB_REF_NAME}.zip" .)
+          done
+          cd ..
+          (cd release && sha256sum *.zip > SHA256SUMS.txt)
+          ls -l release
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "SHIRANUI $GITHUB_REF_NAME" \
+            --generate-notes \
+            release/*.zip release/SHA256SUMS.txt

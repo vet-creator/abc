@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: MIT
+#
+# Static analysis, kept in its own workflow so an analysis hiccup never blocks a
+# build. A tool that parses hostile input for a living should be looked at by
+# something other than its own author.
+name: codeql
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    - cron: "37 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: analyze (c-cpp)
+    runs-on: ubuntu-24.04
+    permissions:
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: c-cpp
+          queries: security-extended
+
+      - name: Build
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build --parallel
+
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:c-cpp"
